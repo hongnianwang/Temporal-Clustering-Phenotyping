@@ -14,7 +14,9 @@ import tensorflow as tf
 from tensorflow.keras.layers import LSTM, Masking, Dense
 import tensorflow.keras.layers as layers
 from utils import embedding_separation_loss, cluster_probability_entropy_loss, predictive_clustering_loss
+import time
 
+from sklearn.cluster import KMeans
 
 class Encoder(layers.Layer):
 
@@ -64,7 +66,7 @@ class Encoder(layers.Layer):
             layer_   = getattr(self, 'layer_' + str(layer_id_))
             x        = layer_(x, trainable = self.training)
 
-        latent_rep   = self.output_layer(x, trainable = self.training)
+        latent_rep   = self.output_layer(x, training = self.training)
 
         return latent_rep
 
@@ -106,8 +108,6 @@ class MLP(layers.Layer):
         return y_pred
 
 
-
-
 class ACTPC(tf.keras.Model):
 
     """
@@ -119,11 +119,13 @@ class ACTPC(tf.keras.Model):
 
     output:
     """
-    def __init__(self, K, output_dim, name, y_type, embeddings = None):
+    def __init__(self, K, output_dim, alpha, init_epochs_ac, name , y_type, embeddings = None):
         super().__init__(name  = name)
         self.K                 = self.num_clusters
         self.output_dim        = output_dim
+        self.alpha             = alpha
         self.y_type            = y_type
+        self.init_epochs_1     = init_epochs_ac
         self.embeddings        = embeddings
         self.Encoder           = Encoder(intermediate_dim = 32, hidden_layers = 1, hidden_nodes = 10, name = 'encoder', training = True)
         self.Predictor         = MLP(output_dim = output_dim, name = 'selector', hidden_layers = 2, output_fn = 'softmax', training = True)
@@ -142,37 +144,45 @@ class ACTPC(tf.keras.Model):
 
         # Feed cluster as input to predictor
         y_pred        = self.static_Predictor(cluster_emb)
-        self.add_loss(predictive_clustering_loss(
-                y_true = y_inputs,
-                y_pred = y_pred,
-                y_type = self.y_type,
-                name   = 'pred_clus_L'
-        ))
-        self.add_loss(cluster_probability_entropy_loss(
-                y_prob = cluster_probs,
-                name   = 'clus_entr_L'
-        ))
 
-        self.add_loss(embedding_separation_loss(
-                self.y_embeddings,
-                name   = 'emb_sep_L'
-        ))
+        return y_pred, cluster_probs
 
-        return y_pred
+    def init_train(self, init_epochs_1 = 10, batch_size = 128 X, y = None):
 
-    def train_step(self, inputs):
-        # Unpack the data
-        x_inputs, y_inputs = inputs
+        """
+        Initialise AC, embeddings and selector
+        """
+        epochs  = init_epochs_1
+        for epoch in range(epochs):
 
-        with tf.GradientTape() as tape:
-            # Compute the Forward Pass and loss
-            y_pred     = self(x_inputs, training = True)
-            loss_value = self.compiled_loss(y_inputs, y_pred)
+            print("\nStart of epoch %d" % (epoch, ))
+            start_time = time.time()
 
-        # Compute Gradients
+            # Iterate through batches
+            for step, (x_train_batch, y_train_batch) in enumerate(X, y):
+                with tf.GradientTape() as tape:
+                    # Compute "Auto Encoder" predicted y
+                    latent_projs = self.Encoder(x_train_batch, training = True)
+                    y_pred       = self.Predictor(latent_projs, training = True)
 
-        gradients      = tape.gradient(loss_value, self.trainable_variables)
-        self.optimizer.apply_gradients(zip(gradients), self.trainable_variables)
+                    # Compute loss function
+                    loss_value   = predictive_clustering_loss(
+                        y_true = y_train_batch,
+                        y_pred = y_pred,
+                        y_type = 'categorical',
+                        name   = 'pred_clus_loss'
+                    )
+                # Compute gradients and update weights
+                train_weights = [var for var in self.trainable_weights if 'encoder ' in var or 'predictor' in var]
+                gradient = tape.gradient(loss_value, train_weights)
+                optimizer.apply_gradients(zip(gradient, train_weights))
+
+                # Log Results every 10 batches
+                if step % 10 == 0:
+                    print("Training Actor-Critic Initialisation Loss for (one batch) at step %d: %.4f" % (step, float(loss_value)))
+                    print("%d samples have been seen so far" % ((step + 1) * batch_size))
+
+
 
 
 

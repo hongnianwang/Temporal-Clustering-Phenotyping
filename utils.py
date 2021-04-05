@@ -39,9 +39,10 @@ def predictive_clustering_loss(y_true, y_pred, y_type = 'categorical', name = 'p
         batch_loss = tf.reduce_mean(tf.reduce_sum((y_true - y_pred) ** 2, axis = -1), name = name)
 
     else:
-        raise Exception('y_type not well-define. Only possible values are {`binary`', `'categorical`',
-                                                                                       `'continuous`')
+        raise Exception("""y_type not well-define. Only possible values are {'binary', 'categorical',
+                                                                                       'continuous'}""")
     return batch_loss
+
 
 def cluster_probability_entropy_loss(y_prob, name = 'clus_entr_L'):
 

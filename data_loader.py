@@ -38,11 +38,14 @@ def import_data(folder_path, data_name):
             assert X.shape[:2] == y.shape[:2]      # X and y must agree on #patient and time dimensions
             
             if np.isnan(X).sum() > 0:              # Some nan values not filled exactly
+                print('Not all values filled! ')
                 X   = np.nan_to_num(X, copy = False, nan = 0.0)
                 assert np.isnan(X) == 0 
         
         except:
             print('Wrong data name specified!')
             raise
-    
+
+        print('To-do: Need to check for standardisation!')
+
         return X, y
