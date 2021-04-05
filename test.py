@@ -2,7 +2,6 @@ import os
 import numpy as np
 import tensorflow as tf
 
-import model as M
 from data_loader import import_data
 
 save_folder = '/home/ball4537/PycharmProjects/PhD-I/data/sample/'
