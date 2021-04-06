@@ -3,43 +3,21 @@ import numpy as np
 import tensorflow as tf
 from data_loader import import_data
 from utils import predictive_clustering_loss
-from base import AC_initialiser
+from base import ACTPC
 
+# Import data as tensorflow data Dataset
 X, y = import_data(
     folder_path = 'data/sample/',
     data_name   = 'X'
 )
 
-init_model  = AC_initialiser(
-    y_dim = y.shape[-1],
+init_model  = ACTPC(
     num_clusters = 12,
-    intermediate_dim = 32,
-    seed = 2323,
-    y_type = 'categorical'
+    output_dim = next(y.as_numpy_iterator()).shape[-1],
+    alpha = 0.1)
+
+init_model.init_train(
+    X = X,
+    y = y
 )
 
-init_model.compile(optimizer = 'adam', loss=predictive_clustering_loss)
-init_model.fit(X, y, epochs = 10, batch_size = 64)
-
-
-def compute_embeddings(self, inputs):
-    if isinstance(inputs, tuple):
-        inputs = inputs[0]
-    "Compute embedding vectors given latent projection"
-    latent_projs = self.Encoder(inputs)
-
-    # Initialise K-means
-    init_km = KMeans(n_clusters=self.K, init='k-means++',
-                     precompute_distance=True, verbose=5,
-                     random_state=self.seed, n_jobs=-1)
-    init_km.fit(inputs)
-
-    # Obtain cluster centres and sample cluster assignments
-    centroids = init_km.cluster_centers_
-    cluster_assig = init_km.predict(self, inputs)
-
-    # Check shapes
-    assert centroids.shape == (self.K, self.int_dim)
-    assert cluster_assig.shape == (inputs.shape[0],)
-
-    return centroids, cluster_assig

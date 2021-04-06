@@ -1,5 +1,6 @@
 import numpy as np
 import os
+import tensorflow as tf
 
 def import_data(folder_path, data_name):
     
@@ -29,13 +30,8 @@ def import_data(folder_path, data_name):
             y_path_ = folder_path + 'y.npy'
             
             X, y    = np.load(x_path_, allow_pickle = True), np.load(y_path_, allow_pickle = True)
-            
-            if len(y.shape) <= 2:   # y is of shape N x y_dim
-                
-                max_len_ = X.shape[1]   # Max-len time-series
-                y = np.repeat(np.expand_dims(y, axis = 1), repeats = X.shape[1], axis = 1)
-                
-            assert X.shape[:2] == y.shape[:2]      # X and y must agree on #patient and time dimensions
+
+            assert X.shape[0] == y.shape[0]      # X and y must agree on #patient and time dimensions
             
             if np.isnan(X).sum() > 0:              # Some nan values not filled exactly
                 print('Not all values filled! ')
@@ -47,5 +43,9 @@ def import_data(folder_path, data_name):
             raise
 
         print('To-do: Need to check for standardisation!')
+
+        # Convert to Tensor Dataset
+        X = tf.data.Dataset.from_tensor_slices(tf.convert_to_tensor(X, dtype = 'float32'))
+        y = tf.data.Dataset.from_tensor_slices(tf.convert_to_tensor(y, dtype = 'float32'))
 
         return X, y
