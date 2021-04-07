@@ -44,8 +44,4 @@ def import_data(folder_path, data_name):
 
         print('To-do: Need to check for standardisation!')
 
-        # Convert to Tensor Dataset
-        X = tf.data.Dataset.from_tensor_slices(tf.convert_to_tensor(X, dtype = 'float32'))
-        y = tf.data.Dataset.from_tensor_slices(tf.convert_to_tensor(y, dtype = 'float32'))
-
         return X, y

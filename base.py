@@ -147,9 +147,9 @@ class ACTPC(tf.keras.Model):
         # Feed cluster as input to predictor
         y_pred        = self.static_Predictor(cluster_emb, training = training)
 
-        return y_pred, cluster_probs
+        return y_pred
 
-    def init_train(self, X, y = None, batch_size = 128, optimizer = optimizers.Adam):
+    def initialise(self, X, y = None, batch_size = 128, optimizer = optimizers.Adam):
 
         """
         Initialise AC, embeddings and selector
@@ -300,18 +300,50 @@ class ACTPC(tf.keras.Model):
             y_pred , cluster_probs = self(X, training = False)
 
 
-    def assign_cluster(self, inputs, one_hot_encoded = False, training = False):
-        """Function to assign cluster for inputs
-        -
-        -
+
+
+    def compute_latent_reps(self, inputs, training = False):
         """
-        _, cluster_probs = self(inputs, training = False)    # Compute cluster probabilities, and sample
-        cluster_samp  = tf.random.categorical(logits = cluster_probs, num_samples = 1, seed = 1717, name = 'cluster sampling')
-        cluster_emb   = tf.gather_nd(params = self.embeddings, indices = tf.expand_dims(cluster_samp, -1))
+        Compute latent representation vectors given inputs (either a batch or array), with training properties specified.
+        """
+        latent_projs     = self.Encoder(inputs, training = training)
+
+        return latent_projs
 
 
 
+    def compute_clusters_and_probs(self, inputs, one_hot = False, training = False):
+        """
+        Compute cluster assignments and cluster probability assignments given inputs and training regimem.
+        Cluster assignments in one hot encoding format specified by "one-hot" parameter
+        """
+        latent_projs    = self.compute_latent_reps(inputs, training = training)
 
+        return self.compute_clusters_and_probs_from_latent(latent_projs, one_hot = one_hot, training = training)
+
+
+
+    def compute_clusters_and_probs_from_latent(self, latent_projs, one_hot = False, training = False):
+        """
+        Compute cluster assignments and cluster probability assignments through latent projections
+        and training regimen. Cluster assignments in one hot encoding format specified by "one-hot"
+        """
+        cluster_probs  = self.Selector(latent_projs, training = training)
+
+        # Assign cluster with highest probability
+        cluster_assign = tf.math.argmax(cluster_probs, axis = -1)
+
+        return cluster_probs, cluster_assign
+
+
+    def compute_y(self, inputs, training = False):
+        """
+        Compute predicted y_vectors given inputs (either a batch or array) with training properties specified (
+        useful for training or prediction).
+        """
+        y_pred           = self(inputs, training = training)
+
+        return y_pred
 
 
 
