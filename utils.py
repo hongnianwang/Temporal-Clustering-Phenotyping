@@ -5,9 +5,7 @@ Some comments
 """
 
 import tensorflow as tf
-from tensorflow.keras.layers import Layer
-from tensorflow.keras.layers import Dense, Masking, LSTM
-from tensorflow.math import log, squared_difference
+from tensorflow.math import log, squared_difference,
 
 
 # Define custom loss functions
@@ -42,6 +40,45 @@ def predictive_clustering_loss(y_true, y_pred, y_type = 'categorical', name = 'p
         raise Exception("""y_type not well-define. Only possible values are {'binary', 'categorical',
                                                                                        'continuous'}""")
     return batch_loss
+
+
+def actor_predictive_clustering_loss(y_true, y_pred, cluster_assignment_probs, y_type = 'categorical', name = 'actor_pred_clus_L'):
+    """
+    Compute prediction clustering loss between predicted output and true output with probability weights from cluster assignments.
+     Inputs have shape (batch_size, num_classes) or (batch_size, num_cluster) for cluster_assignment_probs.
+     There are a variety of different settings, all weighted sample-wise by assignment probability:
+
+    - Binary:  Computes Binary Cross Entropy. Class/Event occurence is matched with a dimension.
+                y_true with entries in [0,1], and y_pred with value between (0,1)
+    - Categorical: Computes Cross Entropy Loss. Class assigned by highest value dimension.
+                y_true is a one-hot encoding, and y_pred is a probabilistic vector.
+    - Continuous: Computes L2 loss. Similar to the Binary case, but class attributes are continuous.
+                y_true and y_pred both with real-value entries.
+
+    Returns: Loss value between sample true y and predicted y based on y_type of shape (batch_size)
+    """
+    if y_type == 'binary'
+        # Compute Binary Cross Entropy weighted by cluster assignment probabilities.
+        sample_loss = tf.math.multiply(tf.reduce_sum(y_true * log(y_pred) + (1 - y_true) * log(y_pred), axis=-1), cluster_assignment_probs)
+        batch_loss  = -tf.reduce_mean(sample_loss, name = name)
+
+        return batch_loss
+
+    elif y_type == 'categorical':
+        # Compute Categorical Cross Entropy weighted by cluster assignment probabilities.
+        sample_loss = tf.math.multiply(tf.reduce_sum(y_true * log(y_pred), axis=-1), cluster_assignment_probs)
+        batch_loss  = -tf.reduce_mean(sample_loss, name=name)
+
+        return batch_loss
+
+    elif y_type == 'continuous':
+        # Compute L2 Loss weighted by cluster assigment probabilities.
+        sample_loss =  tf.math.multiply(tf.reduce_sum((y_true - y_pred) ** 2, axis=-1), cluster_assignment_probs)
+        batch_loss  = tf.reduce_mean(sample_loss, name = name)
+
+        return batch_loss
+
+
 
 
 def cluster_probability_entropy_loss(y_prob, name = 'clus_entr_L'):

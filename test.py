@@ -9,16 +9,23 @@ X_data, y_data = import_data(
     data_name   = 'X'
 )
 
+X_data, y_data  = X_data.astype('float32'), y_data.astype('float32')
+
+
 init_model  = ACTPC(
     num_clusters = 12,
     latent_dim = 32,
     output_dim = y_data.shape[-1],
-    alpha = 0.1)
+    beta  = 0.01,
+    alpha = 0.01)
 
 init_model.initialise(
     X = X_data,
     y = y_data
 )
+
+init_model.compile(optimizer='adam')
+init_model.fit(X_data, y_data, epochs = 5, batch_size = 100)
 
 
 
