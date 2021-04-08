@@ -16,7 +16,7 @@ init_model  = ACTPC(
     num_clusters = 12,
     latent_dim = 32,
     output_dim = y_data.shape[-1],
-    beta  = 0.01,
+    beta  = 0.000001,
     alpha = 0.01)
 
 init_model.initialise(

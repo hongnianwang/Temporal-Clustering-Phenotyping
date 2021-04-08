@@ -5,7 +5,7 @@ Some comments
 """
 
 import tensorflow as tf
-from tensorflow.math import log, squared_difference,
+from tensorflow.math import log, squared_difference, multiply
 
 
 # Define custom loss functions
@@ -57,23 +57,23 @@ def actor_predictive_clustering_loss(y_true, y_pred, cluster_assignment_probs, y
 
     Returns: Loss value between sample true y and predicted y based on y_type of shape (batch_size)
     """
-    if y_type == 'binary'
+    if y_type == 'binary':
         # Compute Binary Cross Entropy weighted by cluster assignment probabilities.
-        sample_loss = tf.math.multiply(tf.reduce_sum(y_true * log(y_pred) + (1 - y_true) * log(y_pred), axis=-1), cluster_assignment_probs)
+        sample_loss = multiply(tf.reduce_sum(y_true * log(y_pred) + (1 - y_true) * log(y_pred), axis=-1), cluster_assignment_probs)
         batch_loss  = -tf.reduce_mean(sample_loss, name = name)
 
         return batch_loss
 
     elif y_type == 'categorical':
         # Compute Categorical Cross Entropy weighted by cluster assignment probabilities.
-        sample_loss = tf.math.multiply(tf.reduce_sum(y_true * log(y_pred), axis=-1), cluster_assignment_probs)
+        sample_loss = multiply(tf.reduce_sum(y_true * log(y_pred), axis=-1), cluster_assignment_probs)
         batch_loss  = -tf.reduce_mean(sample_loss, name=name)
 
         return batch_loss
 
     elif y_type == 'continuous':
         # Compute L2 Loss weighted by cluster assigment probabilities.
-        sample_loss =  tf.math.multiply(tf.reduce_sum((y_true - y_pred) ** 2, axis=-1), cluster_assignment_probs)
+        sample_loss =  multiply(tf.reduce_sum((y_true - y_pred) ** 2, axis=-1), cluster_assignment_probs)
         batch_loss  = tf.reduce_mean(sample_loss, name = name)
 
         return batch_loss
@@ -112,7 +112,7 @@ def embedding_separation_loss(y_embeddings, name = 'emb_sep_L'):
     # Compute L1 distance
     pairwise_loss    = tf.reduce_sum(squared_difference(embedding_column, embedding_row),
                                      axis = -1)  # shape K, K
-    loss             = tf.reduce_sum(pairwise_loss, axis = None, name = 'emb_sep_L')
+    loss             = - tf.reduce_sum(pairwise_loss, axis = None, name = 'emb_sep_L')
 
     return loss
 

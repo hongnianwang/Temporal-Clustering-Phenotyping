@@ -21,9 +21,6 @@ import time
 
 from sklearn.cluster import KMeans
 
-loss_tracker = metrics.Mean(name="loss")
-mae_metric   = metrics.MeanAbsoluteError(name="mae")
-
 
 class Encoder(layers.Layer):
 
@@ -117,6 +114,11 @@ class MLP(layers.Layer):
 
         return y_pred
 
+
+L1        = metrics.Mean(name="pred_clus_loss")
+L1_actor  = metrics.Mean(name="actor_pred_clus_loss")
+L2        = metrics.Mean(name="clus_entr_loss")
+L3        = metrics.Mean(name="emb_sep_loss")
 
 class ACTPC(tf.keras.Model):
 
@@ -300,27 +302,28 @@ class ACTPC(tf.keras.Model):
             y_pred = self.Predictor(cluster_emb, training = True)
 
             # Compute loss
-            loss_1 = predictive_clustering_loss(y_true = y, y_pred = y_pred,
+            loss_critic = predictive_clustering_loss(y_true = y, y_pred = y_pred,
                 y_type = self.y_type, name   = 'pred_clus_loss'
             )
 
-        critic_grad = tape.gradient(target = loss_1, sources = critic_vars)
+        critic_grad = tape.gradient(target = loss_critic, sources = critic_vars)
         self.optimizer.apply_gradients(zip(critic_grad, critic_vars))
+        print('Critic update completed.')
+
 
         "Update Actor - probabilistic assignments remain the same as before"
         actor_vars     = [var for var in self.trainable_weights if 'encoder' in var.name or 'selector' in var.name]
         with tf.GradientTape(watch_accessed_variables=False) as tape:
-            
+            tape.watch(actor_vars)
+
             # Compute cluster probabilities, sampled cluster and probability of sampled cluster
             cluster_probs   = self.Selector(self.Encoder(X, training = True), training = True)
             cluster_samp    = tf.squeeze(tf.random.categorical(logits=cluster_probs, num_samples=1, seed=1717, name='cluster_sampling'))
-            pi_clus_assign  = tf.gather_nd(params=cluster_probs , indices=tf.expand_dims(cluster_samp, -1))
-            print(pi_clus_assign.shape)
+            pi_clus_assign  = tf.gather_nd(params=cluster_probs , indices=tf.stack((tf.range(X.shape[0], dtype = 'int64'), cluster_samp), axis = 1))
             
             # Compute predicted y
             cluster_emb     = tf.gather_nd(params=self.embeddings, indices=tf.expand_dims(cluster_samp, -1))
             y_pred          = self.Predictor(cluster_emb, training = False)
-
 
             # Compute L1 loss weighted by cluster confidence
             weighted_loss_actor_1 = actor_predictive_clustering_loss(
@@ -328,61 +331,68 @@ class ACTPC(tf.keras.Model):
                 y_type = self.y_type, name = 'actor_pred_clus_loss'
             )
 
-            loss_2         = cluster_probability_entropy_loss(
-                y_prob =
+            # Compute Cluster Entropy loss
+            entr_loss  = cluster_probability_entropy_loss(
+                y_prob = cluster_probs,
+                name   = 'clust_entropy_loss'
             )
 
+            loss_actor = weighted_loss_actor_1 + self.alpha * entr_loss
+
+        # Compute gradients and update
+        actor_grad = tape.gradient(target=loss_actor, sources = actor_vars)
+        self.optimizer.apply_gradients(zip(actor_grad, actor_vars))
+        print('Actor update complete.')
 
 
+        "Update embeddings"
+        embedding_vars = self.embeddings
+        with tf.GradientTape(watch_accessed_variables=False) as tape:
+            tape.watch(embedding_vars)
+
+            # Compute cluster_assignments and pred_y
+            cluster_probs = self.Selector(self.Encoder(X, training=False), training=False)
+            cluster_samp  = tf.squeeze(tf.random.categorical(logits=cluster_probs, num_samples=1, seed=1717, name='cluster_sampling'))
+            mask_emb      = tf.one_hot(cluster_samp, depth = self.K)
+            cluster_emb   = tf.linalg.matmul(
+                a = mask_emb, b = embedding_vars
+            )
+            y_pred     = self.Predictor(cluster_emb, training=False)
+
+            # Compute embedding separation loss and predictive clustering loss
+            emb_loss_1 = predictive_clustering_loss(
+                y_true = y,
+                y_pred = y_pred,
+                y_type = self.y_type,
+                name   = 'emb_pred_clus_loss'
+            )
+            emb_loss_2 = embedding_separation_loss(
+                y_embeddings = embedding_vars,
+                name   = 'emb_sep_loss'
+            )
+
+            loss_emb   = emb_loss_1 + self.beta * emb_loss_2
+
+        # Compute gradients and update
+        emb_grad  =  tape.gradient(target=loss_emb, sources=embedding_vars)
+        self.optimizer.apply_gradients(zip([emb_grad], [embedding_vars]))
+        self.embeddings = embedding_vars
+        print('Embeddings update complete.')
 
 
+        # Update Loss functions
+        L1.update_state(loss_critic)
+        L1_actor.update_state(weighted_loss_actor_1)
+        L2.update_state(entr_loss)
+        L3.update_state(emb_loss_2)
 
-        # Update Loss
-        loss_tracker.update_state(loss_1)
-        mae_metric.update_state(y, y_pred)
+        return {'pred_clus': L1.result(), 'actor_loss': L1_actor.result(), 'clus_entr': L2.result(), 'emb_sep': L3.result()}
 
-        return {'loss': loss_1, 'mae': mae_metric.result()}
-
-        # Update embeddings
-        # with tf.GradientTape() as tape:
-        #
-        #     # We are interested only in computing gradient with regards to embeddings
-        #     tape.watch(self.embeddings)
-        #
-        #     latent_projs = self.Encoder(X, training=False)
-        #     cluster_probs = self.Selector(latent_projs, training=False)
-        #
-        #     # Sample cluster
-        #     cluster_samp = tf.random.categorical(logits=cluster_probs, num_samples=1, seed=1717,
-        #                                          name='cluster_sampling')
-        #     cluster_emb = tf.gather_nd(params=self.embeddings, indices=tf.expand_dims(cluster_samp, -1))
-        #
-        #     # y_pred
-        #     y_pred      = self.Predictor(cluster_emb, training = False)
-        #
-        #     loss_1 = predictive_clustering_loss(
-        #         y_true = y,
-        #         y_pred = y_pred,
-        #         y_type = self.y_type,
-        #         name   = 'pred_emb_loss_emb'
-        #     )
-        #
-        #     loss_2 = embedding_separation_loss(
-        #         y_embeddings = cluster_emb,
-        #         name  = 'emb_sep_loss'
-        #     )
-        #
-        # # Update embeddings
-        # gradients_emb = tape.gradient(loss_1, self.embeddings)
-        # optimizer.apply_gradients(zip(gradients_emb, self.embeddings))
-        #
-        #
-        # return loss_1
 
     @property
     def metrics(self):
 
-        return [loss_tracker, mae_metric]
+        return [L1, L1_actor, L2, L3]
 
 
     def compute_latent_reps(self, inputs, training = False):
