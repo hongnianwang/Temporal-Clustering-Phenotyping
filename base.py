@@ -115,10 +115,26 @@ class MLP(layers.Layer):
         return y_pred
 
 
+
+class attention(layers.Layer):
+
+    def __init__(self, name = 'attention'):
+        super().__init__(name = name)
+
+    def build(selfself, input_shape = None):
+        pass
+
+    def call(self, inputs, training = True):
+        pass
+
+
+
+
 L1        = metrics.Mean(name="pred_clus_loss")
 L1_actor  = metrics.Mean(name="actor_pred_clus_loss")
 L2        = metrics.Mean(name="clus_entr_loss")
 L3        = metrics.Mean(name="emb_sep_loss")
+AUC       = metrics.AUC(name="AUROC")
 
 class ACTPC(tf.keras.Model):
 
@@ -169,6 +185,11 @@ class ACTPC(tf.keras.Model):
         y_pred        = self.Predictor(cluster_emb, training = training)
 
         return y_pred
+
+
+    def compile(self, optimizer, **kwargs):
+        super(ACTPC, self).compile(**kwargs)
+        self.optimizer = optimizers.Adam()
 
 
 
