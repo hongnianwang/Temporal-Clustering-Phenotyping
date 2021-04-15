@@ -9,7 +9,6 @@ X_data, y_data = import_data(
     data_name   = 'X'
 )
 
-X_data, y_data  = X_data.astype('float32'), y_data.astype('float32')
 
 
 init_model  = ACTPC(
@@ -19,13 +18,17 @@ init_model  = ACTPC(
     beta  = 0.000001,
     alpha = 0.01)
 
-init_model.initialise(
-    X = X_data,
-    y = y_data
+init_model.build(input_shape = X_data.shape)
+init_model.network_initialise(
+    X = X_data, y = y_data,
+    optimizer = 'adam',
+    init_epochs_ac = 5, init_epochs_pred = 5,
+    batch_size = 512
 )
 
-init_model.compile(optimizer='adam')
-init_model.fit(X_data, y_data, epochs = 5, batch_size = 100)
+# init_model.compile(optimizer='adam')
+# init_model.fit(X_data, y_data, epochs = 5, batch_size = 100)
 
 
 
+y_data.shape

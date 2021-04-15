@@ -44,4 +44,4 @@ def import_data(folder_path, data_name):
 
         print('To-do: Need to check for standardisation!')
 
-        return X, y
+        return X.astype('float32'), y.astype('float32')
