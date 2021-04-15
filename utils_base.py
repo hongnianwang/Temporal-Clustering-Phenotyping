@@ -7,6 +7,7 @@ At the moment, currently temporal loss implementations are computed.
 
 import tensorflow as tf
 from tensorflow.math import log, squared_difference, multiply
+from tensorflow.keras.callbacks import ModelCheckpoint as Checkpoint
 
 
 # Define custom loss functions
@@ -141,6 +142,9 @@ def selector_init_loss(y_prob, clusters, name = 'init_selec_loss'):
 
     return batch_loss
 
+
+
+# Define custom Callbacks here to add to model fitting
 
 
 

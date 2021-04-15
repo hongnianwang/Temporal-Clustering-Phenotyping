@@ -172,10 +172,11 @@ class MLP(layers.Layer):
 
 
 
-L1        = metrics.Mean(name="pred_clus_loss")
-L1_actor  = metrics.Mean(name="actor_pred_clus_loss")
-L2        = metrics.Mean(name="clus_entr_loss")
-L3        = metrics.Mean(name="emb_sep_loss")
+L1        = metrics.Mean(name="Critic_loss")
+L1_actor  = metrics.Mean(name="Actor_loss")
+L2        = metrics.Mean(name="Emb_loss")
+L3        = metrics.Mean(name="L2_loss")
+L4        = metrics.Mean(name="L3_loss")
 AUC       = metrics.AUC(name="AUROC")
 
 class ACTPC(tf.keras.Model):
@@ -349,7 +350,8 @@ class ACTPC(tf.keras.Model):
         cluster_unroll= tf.reshape(cluster_probs, shape = [-1, self.K])
 
         # Sample cluster embeddings from probabilistic assignment
-        cluster_samp  = tf.squeeze(tf.random.categorical(logits = cluster_unroll, num_samples = 1, seed = self.seed))
+        cluster_samp  = tf.squeeze(tf.random.categorical(logits = cluster_unroll, num_samples = 1,
+                                                         seed = self.seed))
         cluster_emb_unroll   = tf.gather_nd(params = self.embeddings, indices = tf.expand_dims(cluster_samp, -1))
         new_shape     = cluster_probs.get_shape().as_list()[:-1] + [self.latent_dim]
         cluster_emb   = tf.reshape(cluster_emb_unroll, shape = new_shape)
@@ -415,7 +417,7 @@ class ACTPC(tf.keras.Model):
 
                 # Log Results every 10 batches
                 if step % 10 == 0:
-                    print("\nAC Initialisation Loss for (one batch) at step %d: %.4f" % (step, float(loss_value)))
+                    print("AC Initialisation Loss for (one batch) at step %d: %.4f" % (step, float(loss_value)))
 
         print('Time taken for AC init: {:.4f}'.format(time.time() - start_time))
         print('AC-initialisation complete! ')
@@ -521,24 +523,16 @@ class ACTPC(tf.keras.Model):
 
     # Main training step iterative update
     def train_step(self, inputs, training = True):
-
         X, y = inputs
-
-        critic_vars   = [var for var in self.trainable_weights if 'predictor' in var.name]
-
-        latent_projs  = self.Encoder(X, training=False)
-        cluster_probs = self.Selector(latent_projs, training=False)
-
-        # Sample cluster
-        cluster_samp  = tf.squeeze(tf.random.categorical(logits=cluster_probs, num_samples=1, seed=1717, name='cluster_sampling'))
-        cluster_emb   = tf.gather_nd(params=self.embeddings, indices=tf.expand_dims(cluster_samp, -1))
 
         "Update Critic"
         with tf.GradientTape(watch_accessed_variables=False) as tape:
-            tape.watch(critic_vars + [cluster_emb])
+            critic_vars = [var for var in self.trainable_weights if 'predictor' in var.name]
+            # tape.watch(critic_vars + [cluster_emb])
+            tape.watch(critic_vars)
 
             # Forward pass
-            y_pred = self.Predictor(cluster_emb, training = True)
+            y_pred = self.call(X, training = True)
 
             # Compute loss
             loss_critic = aux.predictive_clustering_loss(y_true = y, y_pred = y_pred,
@@ -547,22 +541,31 @@ class ACTPC(tf.keras.Model):
 
         critic_grad = tape.gradient(target = loss_critic, sources = critic_vars)
         self.optimizer.apply_gradients(zip(critic_grad, critic_vars))
-        print('Critic update completed.')
 
 
         "Update Actor - probabilistic assignments remain the same as before"
-        actor_vars     = [var for var in self.trainable_weights if 'encoder' in var.name or 'selector' in var.name]
         with tf.GradientTape(watch_accessed_variables=False) as tape:
+            # Variables to consider
+            actor_vars = [var for var in self.trainable_weights if 'encoder' in var.name or 'selector' in var.name]
             tape.watch(actor_vars)
 
-            # Compute cluster probabilities, sampled cluster and probability of sampled cluster
-            cluster_probs   = self.Selector(self.Encoder(X, training = True), training = True)
-            cluster_samp    = tf.squeeze(tf.random.categorical(logits=cluster_probs, num_samples=1, seed=1717, name='cluster_sampling'))
-            pi_clus_assign  = tf.gather_nd(params=cluster_probs , indices=tf.stack((tf.range(X.shape[0], dtype = 'int64'), cluster_samp), axis = 1))
+            # Compute Forward pass variables
+            latent_projs   = self.Encoder(X, training = True)
+            cluster_probs  = self.Selector(latent_projs, training = True)
 
-            # Compute predicted y
-            cluster_emb     = tf.gather_nd(params=self.embeddings, indices=tf.expand_dims(cluster_samp, -1))
-            y_pred          = self.Predictor(cluster_emb, training = False)
+            # Unroll Assignments to Sample cluster and compute corresponding embedding
+            cluster_unroll     = tf.reshape(cluster_probs, shape = [-1, self.K])
+            cluster_samp       = tf.squeeze(tf.random.categorical(logits = cluster_unroll, num_samples = 1,
+                                                                  seed = self.seed, dtype = 'int32'))
+            cluster_emb_unroll = tf.gather_nd(params = self.embeddings, indices = tf.expand_dims(cluster_samp, -1))
+            new_shape          = cluster_probs.get_shape().as_list()[:-1] + [self.latent_dim]
+            cluster_emb        = tf.reshape(cluster_emb_unroll, shape = new_shape)
+
+            # Compute output vector and probability for corresponding cluster given sampled cluster embedding
+            idx_slices_        = tf.stack((tf.range(cluster_unroll.get_shape()[0]), cluster_samp), axis = 1)
+            pi_clus_assign_unroll = tf.gather_nd(params=cluster_unroll, indices=idx_slices_)
+            pi_clus_assign     = tf.reshape(pi_clus_assign_unroll, shape = cluster_probs.get_shape()[:-1])
+            y_pred             =  self.Predictor(cluster_emb, training = training)
 
             # Compute L1 loss weighted by cluster confidence
             weighted_loss_actor_1 = aux.actor_predictive_clustering_loss(
@@ -581,7 +584,6 @@ class ACTPC(tf.keras.Model):
         # Compute gradients and update
         actor_grad = tape.gradient(target=loss_actor, sources = actor_vars)
         self.optimizer.apply_gradients(zip(actor_grad, actor_vars))
-        print('Actor update complete.')
 
 
         "Update embeddings"
@@ -591,11 +593,17 @@ class ACTPC(tf.keras.Model):
 
             # Compute cluster_assignments and pred_y
             cluster_probs = self.Selector(self.Encoder(X, training=False), training=False)
-            cluster_samp  = tf.squeeze(tf.random.categorical(logits=cluster_probs, num_samples=1, seed=1717, name='cluster_sampling'))
-            mask_emb      = tf.one_hot(cluster_samp, depth = self.K)
-            cluster_emb   = tf.linalg.matmul(
-                a = mask_emb, b = embedding_vars
+            cluster_unroll     = tf.reshape(cluster_probs, shape = [-1, self.K])
+            cluster_samp       = tf.squeeze(tf.random.categorical(logits = cluster_unroll, num_samples = 1,
+                                                                  seed = self.seed))
+
+            mask_emb           = tf.one_hot(cluster_samp, depth = self.K)
+            cluster_emb_unroll = tf.linalg.matmul(
+                a = mask_emb, b= embedding_vars
             )
+
+            new_shape  = cluster_probs.get_shape().as_list()[:-1] + [self.latent_dim]
+            cluster_emb= tf.reshape(cluster_emb_unroll, shape = new_shape)
             y_pred     = self.Predictor(cluster_emb, training=False)
 
             # Compute embedding separation loss and predictive clustering loss
@@ -616,16 +624,17 @@ class ACTPC(tf.keras.Model):
         emb_grad  =  tape.gradient(target=loss_emb, sources=embedding_vars)
         self.optimizer.apply_gradients(zip([emb_grad], [embedding_vars]))
         self.embeddings = embedding_vars
-        print('Embeddings update complete.')
 
 
         # Update Loss functions
         L1.update_state(loss_critic)
-        L1_actor.update_state(weighted_loss_actor_1)
-        L2.update_state(entr_loss)
-        L3.update_state(emb_loss_2)
+        L1_actor.update_state(loss_actor)
+        L2.update_state(loss_emb)
+        L3.update_state(entr_loss)
+        L4.update_state(emb_loss_2)
 
-        return {'pred_clus': L1.result(), 'actor_loss': L1_actor.result(), 'clus_entr': L2.result(), 'emb_sep': L3.result()}
+        return {'Critic_loss': L1.result(), 'actor_loss': L1_actor.result(),
+                'Emb_loss': L2.result(), 'L2_loss': L3.result(), 'L3_loss': L4.result()}
 
 
     @property
