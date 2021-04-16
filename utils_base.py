@@ -7,7 +7,7 @@ At the moment, currently temporal loss implementations are computed.
 
 import tensorflow as tf
 from tensorflow.math import log, squared_difference, multiply
-from tensorflow.keras.callbacks import ModelCheckpoint as Checkpoint
+from sklearn.metrics import roc_auc_score
 
 
 # Define custom loss functions
@@ -144,7 +144,22 @@ def selector_init_loss(y_prob, clusters, name = 'init_selec_loss'):
 
 
 
-# Define custom Callbacks here to add to model fitting
+# class old_AUROC(tf.keras.metrics.Metric):
+#
+#     def __init__(self, name = 'Numpy AUROC computation', **kwargs):
+#         super().__init__(**kwargs)
+#
+#     def update_state(self, y_true, y_pred, sample_weight = None):
+#         # Compute using numpy
+#         npy_true = y_true.numpy()
+#         npy_pred = y_pred.numpy()
+#
+#         auroc    = roc_auc_score(
+#             y_true = npy_true,
+#             y_score= npy_pred,
+#             average= None,
+#             multi_class='OVO'
+#         )
 
 
 

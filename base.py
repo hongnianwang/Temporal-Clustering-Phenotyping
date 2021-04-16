@@ -172,12 +172,20 @@ class MLP(layers.Layer):
 
 
 
-L1        = metrics.Mean(name="Critic_loss")
-L1_actor  = metrics.Mean(name="Actor_loss")
-L2        = metrics.Mean(name="Emb_loss")
-L3        = metrics.Mean(name="L2_loss")
-L4        = metrics.Mean(name="L3_loss")
-AUC       = metrics.AUC(name="AUROC")
+L1_cri    = metrics.Mean(name = "LCri")
+L1_act    = metrics.Mean(name = "LAct")     # L1 + alpha x entropy
+L_emb     = metrics.Mean(name = "LEmb")
+L2        = metrics.Mean(name = "L2")
+L3        = metrics.Mean(name = "L3")
+
+# Validation Metrics
+val_L1_cri= metrics.Mean(name = "val_LCri")
+val_L1_act= metrics.Mean(name = 'val_LAct')
+val_L_emb = metrics.Mean(name = 'val_LEmb')
+val_L2    = metrics.Mean(name = 'val_L2')
+val_L3    = metrics.Mean(name = 'val_L3')
+AUC       = metrics.Mean(name = 'numpy auroc')
+
 
 class ACTPC(tf.keras.Model):
     """
@@ -347,14 +355,9 @@ class ACTPC(tf.keras.Model):
         # Compute cluster probabilistic assignments
         latent_projs  = self.Encoder(x, training = training)
         cluster_probs = self.Selector(latent_projs, training = training)
-        cluster_unroll= tf.reshape(cluster_probs, shape = [-1, self.K])
 
         # Sample cluster embeddings from probabilistic assignment
-        cluster_samp  = tf.squeeze(tf.random.categorical(logits = cluster_unroll, num_samples = 1,
-                                                         seed = self.seed))
-        cluster_emb_unroll   = tf.gather_nd(params = self.embeddings, indices = tf.expand_dims(cluster_samp, -1))
-        new_shape     = cluster_probs.get_shape().as_list()[:-1] + [self.latent_dim]
-        cluster_emb   = tf.reshape(cluster_emb_unroll, shape = new_shape)
+        cluster_emb, _= self.sample_cluster_pis(cluster_probs)
 
         # Output vector given sampled cluster embedding
         y_pred        = self.Predictor(cluster_emb, training = training)    # Shape bs x T x self.output_dim
@@ -554,22 +557,14 @@ class ACTPC(tf.keras.Model):
             cluster_probs  = self.Selector(latent_projs, training = True)
 
             # Unroll Assignments to Sample cluster and compute corresponding embedding
-            cluster_unroll     = tf.reshape(cluster_probs, shape = [-1, self.K])
-            cluster_samp       = tf.squeeze(tf.random.categorical(logits = cluster_unroll, num_samples = 1,
-                                                                  seed = self.seed, dtype = 'int32'))
-            cluster_emb_unroll = tf.gather_nd(params = self.embeddings, indices = tf.expand_dims(cluster_samp, -1))
-            new_shape          = cluster_probs.get_shape().as_list()[:-1] + [self.latent_dim]
-            cluster_emb        = tf.reshape(cluster_emb_unroll, shape = new_shape)
+            cluster_emb, cluster_pis = self.sample_cluster_pis(cluster_probs)
 
             # Compute output vector and probability for corresponding cluster given sampled cluster embedding
-            idx_slices_        = tf.stack((tf.range(cluster_unroll.get_shape()[0]), cluster_samp), axis = 1)
-            pi_clus_assign_unroll = tf.gather_nd(params=cluster_unroll, indices=idx_slices_)
-            pi_clus_assign     = tf.reshape(pi_clus_assign_unroll, shape = cluster_probs.get_shape()[:-1])
             y_pred             =  self.Predictor(cluster_emb, training = training)
 
             # Compute L1 loss weighted by cluster confidence
             weighted_loss_actor_1 = aux.actor_predictive_clustering_loss(
-                y_true = y, y_pred = y_pred, cluster_assignment_probs = pi_clus_assign,
+                y_true = y, y_pred = y_pred, cluster_assignment_probs = cluster_pis,
                 y_type = self.y_type, name = 'actor_pred_clus_loss'
             )
 
@@ -627,20 +622,141 @@ class ACTPC(tf.keras.Model):
 
 
         # Update Loss functions
-        L1.update_state(loss_critic)
-        L1_actor.update_state(loss_actor)
-        L2.update_state(loss_emb)
-        L3.update_state(entr_loss)
-        L4.update_state(emb_loss_2)
+        print("------------------------------------------------------")
+        print("Updating Metrics and Loss Functions. \nL1 - predictive clustering loss \nL2 - entropy loss")
+        print("L3 - embedding separation loss \nL1_cri - L1 \nL1_act - weighted_L1 + alpha*L2 (weights are pis)")
+        print("L_emb - L1 + beta*L3")
 
-        return {'Critic_loss': L1.result(), 'actor_loss': L1_actor.result(),
-                'Emb_loss': L2.result(), 'L2_loss': L3.result(), 'L3_loss': L4.result()}
+        L1_cri.update_state(loss_critic)
+        L1_act.update_state(loss_actor)
+        L_emb.update_state(loss_emb)
+        L2.update_state(entr_loss)
+        L3.update_state(emb_loss_2)
+
+        # 'L2': L2.result(), 'L3': L3.result()
+
+        return {'cri_loss': L1_cri.result(), 'act_loss': L1_act.result(),
+                'emb_loss': L_emb.result()}
 
 
+    # Evaluation step for Validation or Evaluation
+    def test_step(self, inputs):
+        X, y = inputs
+
+        # Compute Forward pass variables
+        latent_projs = self.Encoder(X, training = False)
+        cluster_probs = self.Selector(latent_projs, training = False)
+
+        cluster_emb, cluster_pis = self.sample_cluster_pis(cluster_probs)
+        y_pred = self.Predictor(cluster_emb, training = False)
+
+        # Compute Loss Functions
+        pred_clus_loss = aux.predictive_clustering_loss(y_true = y, y_pred = y_pred, y_type = self.y_type)
+        entr_loss      = aux.cluster_probability_entropy_loss(y_prob = cluster_probs)
+        clus_sep_loss  = aux.embedding_separation_loss(y_embeddings = self.embeddings)
+        weig_pred_loss = aux.actor_predictive_clustering_loss(y_true = y, y_pred = y_pred,
+                                                          cluster_assignment_probs = cluster_pis, y_type = self.y_type)
+
+        critic_loss    = pred_clus_loss
+        actor_loss     = weig_pred_loss + self.alpha * entr_loss
+        Emb_loss       = pred_clus_loss + self.beta * clus_sep_loss
+
+        # Update Metrics and losses
+        val_L1_cri.update_state(critic_loss)
+        val_L1_act.update_state(actor_loss)
+        val_L_emb.update_state(Emb_loss)
+        val_L2.update_state(entr_loss)
+        val_L3.update_state(clus_sep_loss)
+
+        # Compute AUC
+
+        return {'cri_loss': val_L1_cri.result(), 'act_loss': val_L1_act.result(),
+                'emb_loss': val_L_emb.result()}
+
+
+
+    def get_config(self):
+        # Save notes
+        save_dic = {'Clusters': self.K,
+                    'y_dims': self.output_dim,
+                    'y_type': self.y_type,
+                    'latent_dim': self.latent_dim,
+                    'beta': self.beta,
+                    'alpha': self.alpha,
+                    'seed': self.seed,
+                    'custom_embedding_init': self.custom_emb_init,
+                    'num_encoder_layers': self.num_encoder_layers,
+                    'num_encoder_nodes': self.num_encoder_nodes,
+                    'state_fn': self.state_fn,
+                    'recurrent_activation': self.recurrent_activation,
+                    'encoder_dropout': self.encoder_dropout,
+                    'recurrent_dropout': self.recurrent_dropout,
+                    'mask_value': self.mask_value,
+                    'num_selector_layers': self.num_selector_layers,
+                    'num_selector_nodes': self.num_selector_nodes,
+                    'selector_fn': self.selector_fn,
+                    'selector_output_fn': self.selector_output_fn,
+                    'selector_dropout': self.selector_dropout,
+                    'num_predictor_layers': self.num_predictor_layers,
+                    'num_predictor_nodes': self.num_predictor_nodes,
+                    'predictor_fn': self.predictor_fn,
+                    'predictor_output_fn': self.predictor_output_fn,
+                    'predictor_dropout': self.predictor_dropout,
+                    'encoder_name': self.encoder_name,
+                    'selector_name': self.selector_name,
+                    'predictor_name': self.predictor_name
+                    }
+
+        return save_dic
+
+
+    def sample_cluster_pis(self, cluster_probs):
+        """
+        Auxiliary function to sample with differentiation.
+
+        Inputs
+                cluster_probs:  of shape (bs , T, num_clusters)
+                embeddings: of shape (num_clusters, latent_dim)
+        returns: A sampled embedding given the corresponding probabilistic assignment of shape (bs, T, latent_dim)
+        """
+        # Unroll Cluster to 2D format
+        pis_unroll_  = tf.reshape(cluster_probs, shape = [-1, self.K])
+
+        # Sample given probabilistic assignment to each sample, time pair (i,j)
+        cluster_samp = tf.squeeze(tf.random.categorical(logits = pis_unroll_, num_samples = 1,
+                                                        seed = self.seed))
+        # Convert to one_hot encoding
+        mask_emb = tf.one_hot(cluster_samp, depth = self.K)
+
+        # Matrix multiplication returns unrolled data with corresponding embedding value
+        cluster_emb_unroll = tf.linalg.matmul(
+            a = mask_emb, b = self.embeddings)
+
+        # Return to temporal shape
+        new_shape   = cluster_probs.get_shape().as_list()[:-1] + [self.latent_dim]
+        cluster_emb = tf.reshape(cluster_emb_unroll, shape = new_shape)
+
+        # Compute corresponding probability assignment
+        idx_slices_      = tf.stack((tf.range(pis_unroll_.get_shape()[0]),
+                                tf.cast(cluster_samp, dtype = 'int32')), axis = 1)   # 2D with indices (k, pred_cluster)
+        clus_pi_unroll_  = tf.gather_nd(params = pis_unroll_, indices = idx_slices_)   #
+        clus_pi          = tf.reshape(clus_pi_unroll_, shape = cluster_probs.get_shape()[:-1])
+
+        return cluster_emb, clus_pi
+
+
+
+    @classmethod
+    def from_config(cls, config, custom_objects=None):
+        return cls(**config)
+
+
+    # to reset metrics each time is called
     @property
     def metrics(self):
+        "Return initialised metrics"
+        return [L1_cri, L1_act, L_emb, L2, L3, val_L1_act, val_L1_cri, val_L_emb, val_L2, val_L3]
 
-        return [L1, L1_actor, L2, L3]
 
 
     def compute_latent_reps(self, inputs, training = False):
