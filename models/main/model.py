@@ -409,9 +409,18 @@ class SEL_INIT(tf.keras.Model):
     - output_dim          : dimensionality of target predicted output (default = 4).
     - y_type              : type of output prediction ("binary", "categorical" or "continuous"). (default = 'categorical')
     - latent_dim          : dimensionality of latent space (default = 32)
-    - beta                : L3 weighting in clustering embedding separation. (default = 0.01)
     - alpha               : L2 weighting in cluster entropy. (default = 0.01)
     - seed                : Seed to run analysis on (default = 4347)
+
+        (Encoder Params)
+    - num_encoder_layers  : Number of "hidden" Encoder layers. (default = 1)
+    - num_encoder_nodes   : For hidden Encoder layers, the dimensionality of the cell state. (default = 32)
+    - state_fn            : The activation function to use on cell state/output. (default = 'tanh')
+    - recurrent_activation: The activation function to use on forget/input/output gates. (default = 'sigmoid')
+    - encoder_dropout     : dropout rate to be used on cell state/output computation. (default = 0.6)
+    - recurrent_dropout   : dropout rate to be used on forget/input/output gates. (default = 0)
+    - mask_value          : mask_value to feed to masking layer (default = 0.0)
+    - encoder_name        : Name on which to save layer (default = 'encoder')
     
         (Selector Params)
     - num_selector_layers : Number of "hidden" feedforward layers on Selector. (default = 2)
@@ -420,18 +429,14 @@ class SEL_INIT(tf.keras.Model):
     - selector_output_fn  : The activation function on the output of Selector. (default = 'softmax')
     - selector_dropout    : dropout rate to be used on Selector computation. (default = 0.6)
     - selector_name       : Name on which to save Selector Layer. (default = 'selector')
-    
-        (Kwargs)
-    - Arguments to be passed to Enc_Pred Class.
-
 
     """
     def __init__(self, num_clusters = 6, output_dim = 4, y_type = "categorical", latent_dim = 32, alpha = 0.01, seed = 4347,
                  num_encoder_layers = 2, num_encoder_nodes = 32, state_fn = 'tanh', recurrent_activation = 'sigmoid', 
                  encoder_dropout = 0.6, recurrent_dropout = 0.0, mask_value = 0.0,  encoder_name = 'encoder', 
                  num_selector_layers = 2, num_selector_nodes = 20, selector_fn = "sigmoid", selector_output_fn = "softmax",
-                 selector_dropout = 0.6, selector_name = 'selector', **kwargs):
-        super().__init__(**kwargs)
+                 selector_dropout = 0.6, selector_name = 'selector'):
+        super().__init__()
         
         # General params
         self.K                   = num_clusters
@@ -600,7 +605,7 @@ class ACTPC(tf.keras.Model):
     """ 
     def __init__(self, num_clusters = 12, output_dim = 4, y_type = "categorical",
          latent_dim = 32, beta = 0.01, alpha = 0.01, seed = 4347, embeddings = None, num_encoder_layers = 2, num_encoder_nodes = 32, state_fn = 'tanh', recurrent_activation = 'sigmoid', encoder_dropout = 0.6, recurrent_dropout = 0, mask_value = 0.0,  encoder_name = 'encoder', selector_name = 'selector', num_selector_layers = 2, num_selector_nodes = 32, selector_fn = 'sigmoid', selector_output_fn = 'softmax', selector_dropout = 0.6, predictor_name = 'predictor', num_predictor_layers = 2, num_predictor_nodes = 32, predictor_fn = 'sigmoid', predictor_dropout = 0.6):
-        
+
         super().__init__()
 
         # General params
@@ -653,7 +658,7 @@ class ACTPC(tf.keras.Model):
 
     
     # Build method to initialise model
-    def build(self, embeddings = None , input_shape = None):
+    def build(self, input_shape = None. embeddings = None):
 
         # Initialise Layers and Embeddings.
         self.Encoder           = Encoder(intermediate_dim = self.latent_dim,
@@ -685,13 +690,11 @@ class ACTPC(tf.keras.Model):
 
         # Check if embeddings have been given or need to be initialise
         if embeddings is None:
-            
-            self.custom_embedding_init = False
+
             self.embeddings        = tf.Variable(initial_value = tf.zeros(shape = [self.K, self.latent_dim], dtype = 'float32'),
                                                   trainable = True, name = 'embeddings' )
         else:
             try:
-                self.custom_embedding_init = True
                 self.embeddings    = tf.Variable(initial_value = embeddings, trainable = True, name = 'embeddings')
                 
             except Exception as e:
@@ -708,250 +711,52 @@ class ACTPC(tf.keras.Model):
         # assign x to updatable tensor
         x = inputs
 
-        # Compute cluster probabilistic assignments
-        latent_projs  = self.Encoder(x, training = training)
-        cluster_probs = self.Selector(latent_projs, training = training)
+        # Compute steps
+        latent_projs = self.Encoder(X, training=False)
+        cluster_probs = self.Selector(latent_projs, training=False)
 
-        # Sample cluster embedding and corresponding probability given probability assignments
-        cluster_sel , cluster_prob = self.sample_cluster_pis(cluster_probs)
+        # Flatten and sample cluster
+        pis_unroll_ = tf.reshape(cluster_probs, shape=[-1, self.K])
+        cluster_samp = tf.squeeze((tf.random.categorical(logits=pis_unroll_, num_samples=1,
+                                                         seed=self.seed)))
+
+        # Convert to one_hot encoding
+        mask_emb = tf.one_hot(cluster_samp, depth=self.K)
+
+        # Matrix multiplication returns unrolled data with corresponding embedding value
+        cluster_emb_unroll = tf.linalg.matmul(
+            a=mask_emb, b=self.embeddings)
+
+        # Return to temporal shape
+        new_shape = [-1, cluster_probs.get_shape()[1]] + [self.latent_dim]
+        cluster_emb = tf.reshape(cluster_emb_unroll, shape=new_shape)
 
         # Output vector given sampled cluster embedding
-        y_pred       = self.Predictor(cluster_sel, training = training)    # Shape bs x T x self.output_dim
+        y_pred = self.Predictor(cluster_emb, training=training)
 
-        return y_pred
-
-
-    # Define initialisation procedure for weights
-    def init_params(self, X, y, optimizer = 'adam', batch_size = 64, init_epochs_ac = 5, init_epochs_pred = 5, **kwargs):
-        
-        """
-        Initialisation Method for AC-TPC:
-            1 - X - Encoder - Predictor - y initialise
-            2 - initialise Selector based on output of Selector (maximise entropy)
-            3 - initialise embeddings based on K-Means on the latent space, if embeddings have not been given.
-
-        Params:
-        - X, y: Input Numpy arrays / Tensor arrays of shape (nx, T, xdims), (ny, T, ydims).
-        - batch_size: batch size for minibatch sampling. (default = 64)
-        - init_epochs_ac: Initialisation epochs for Encoder-Predictor initialisation. (default = 5)
-        - init_epohcs_pred: Initialisation epochs for Selector initialisation. (default = 5)
-        - kwargs: named arguments to be fed into other functions.
-
-        Returns: Updates Layer Weights and embeddings according to initialisation method.
-        """
-        print('\n--------------------------------------------')
-        print('Initialising Actor-Critic networks')
-              
-        # Load data 
-        data           = tf.data.Dataset.from_tensor_slices((X,y))
-        epochs  = init_epochs_ac
-        
-        # Initialise optimizer
-        if type(optimizer) == str:
-            self.optimizer = self._get_optimizer(optimizer)
-        else:
-            self.optimizer = optimizer
-
-        # Initialise epoich loss tracker
-        avg = 0
-        
-        # Iterate through training manually
-        for epoch in range(epochs):
-            
-            if epoch % 10 == 0:
-                print("\nStart of epoch %d" % (epoch, ))
-            
-            # Shuffle data each epoch and generate batch enumerator
-            data_shuffle = data.shuffle(buffer_size = 5000).batch(batch_size)
-            
-            # Initialise tracker
-            epoch_loss = 0
-
-            # Iterate through batches and compute gradients.
-            for step, (x_train_batch, y_train_batch) in enumerate(data_shuffle):
-                with tf.GradientTape(watch_accessed_variables = False) as tape:
-                        
-                    # variables to watch and compute gradients for
-                    ac_vars = [var for var in self.weights if 'encoder' in var.name or 'predictor' in var.name]
-                    tape.watch(ac_vars)
-
-                    # Compute "Auto Encoder" predicted y
-                    latent_projs = self.Encoder(x_train_batch, training = True)
-                    y_pred       = self.Predictor(latent_projs, training = True)
-
-                    # Compute loss function
-                    loss_value   = net_utils.predictive_clustering_loss(
-                        y_true = y_train_batch,
-                        y_pred = y_pred,
-                        y_type = self.y_type,
-                        name   = 'ac init loss'
-                    )
-                    
-                # Compute gradients and update weights
-                gradient = tape.gradient(loss_value, ac_vars)
-                self.optimizer.apply_gradients(grads_and_vars=zip(gradient, ac_vars))
-                
-                epoch_loss += loss_value.numpy()
-                
-            # Update loss tracker
-            avg += epoch_loss/step
-                
-            # Log Results every 10 epochs
-            if epoch % 10 == 0:
-                print("AC Initialisation Loss Average at epoch %d: %.4f" % (epoch, float(avg/10)))
-                avg = 0
-
-
-        print('AC-initialisation complete! ')
-
-
-        # Initialise embeddings through closest in cluster space
-        print('\n------------------------------------')
-        print('Initialising Embeddings')
-        start_time = time.time()
-
-        if self.custom_embedding_init == False:
-            
-            # Compute predicted ys
-            latent_projs = self.Encoder(X, training = False)
-            y_pred       = self.Predictor(latent_projs, training = False)    
-
-            # Collapse the time axis
-            y_npy        = y_pred.numpy()
-            y_unroll     = y_npy.reshape(-1, self.output_dim)                # shape (nx x T, ydims)
-
-            # Compute KMeans on unrolled predicted output
-            init_km = KMeans(n_clusters = self.K, init='k-means++', random_state = self.seed, **kwargs)
-            init_km.fit(y_unroll)
-
-            # Obtain cluster centres and sample cluster assignments
-            centers_      = init_km.cluster_centers_                             # shape (K, ydims)
-            cluster_assign= init_km.predict(y_unroll).reshape(y_npy.shape[:-1])  # shape (nx, T)
-
-            # Compute embedding vectors as closest latent to cluster centroid
-            emb_vecs_     = np.zeros(shape = (self.K, self.latent_dim), dtype = 'float32')
-            for k in range(self.K):
-                
-                # Compute relevant points (assigned to cluster, only)
-                ys_in_cluster    = y_npy[cluster_assign == k, :]
-                centroid = centers_[k, :]
-                
-                # Compute closest point
-                distances_to_centroid_ = np.sum(np.square(np.subtract(ys_in_cluster, centroid)), axis = -1) # shape (nx, T)
-                closest_id_ = np.argmin(distances_to_centroid_)
-                
-                # latent
-                latent_closest_id_ = latent_projs.numpy().reshape(-1, self.latent_dim)[closest_id_, :]
-                
-                # assign cluster embedding the corresponding latent projection)
-                emb_vecs_[k, :] = latent_closest_id_
-
-                # # Consider only those assigned to cluster k
-                # latents_in_cluster = latent_projs.numpy()[cluster_assign == k, :]
-                
-                # # Compute mean
-                # mean_latents = np.mean(np.mean(latents_in_cluster, axis = 1), axis = 0)
-
-                # # assign cluster embedding the corresponding latent projection)
-                # emb_vecs_[k, :] = mean_latents
-
-            # self.embeddings.assign(tf.convert_to_tensor(np.arctanh(emb_vecs_), name = 'embeddings', dtype = 'float32'), name = 'embeddings_init')
-            self.embeddings.assign(tf.convert_to_tensor(emb_vecs_, name = 'embeddings', dtype = 'float32'), name = 'embeddings_init')
-            
-
-        else:
-            print('Embeddings fed into initialisation. Custom cluster initialisation skipped.')
-            # cluster_assign = #Some formula with current embeddings
-
-        # Print Time
-        print('Time taken: {:.4f}'.format(time.time() - start_time))
-        print('Cluster Embedding complete')
-
-
-        # Initialise Selector
-        print('\n------------------------------------')
-        print('Initialising Selector Networks')
-        epochs = init_epochs_pred
-
-        # Input cluster_true values in useful format
-        cluster_assign = tf.convert_to_tensor(value = cluster_assign, dtype = 'int32', name = 'cluster_assign')
-        clus_init_one_hot = tf.one_hot(cluster_assign, depth = self.K, axis = -1)
-
-        # Save X, clus jointly to load correct estimated clusters for each batch
-        data = tf.data.Dataset.from_tensor_slices((X, tf.cast(clus_init_one_hot, dtype = 'float32')))
-        
-        # Initialise loss tracker
-        avg_loss = 0
-        
-        # Iterate through epochs manually
-        for epoch in range(epochs):
-
-            if epoch % 10 ==0:
-                print("\nStart of epoch %d" % (epoch, ))
-                
-                
-            start_time = time.time()
-
-            # Shuffle data each epoch and generate batch enumerator
-            data_shuffle = data.shuffle(buffer_size=5000).batch(batch_size)
-            
-            # loss for epoch
-            epoch_loss = 0
-
-            # Iterate through batches
-            for step, (x_train_batch, clus_batch) in enumerate(data_shuffle):
-                with tf.GradientTape(watch_accessed_variables = False) as tape:
-
-                    sel_vars = [var for var in self.weights if 'selector' in var.name]
-                    tape.watch(sel_vars)
-
-                    # Compute Cluster Assignment probabilities
-                    latent_projs = self.Encoder(x_train_batch, training = False)
-                    cluster_prob = self.Selector(latent_projs, training = True)
-
-                    # Compute loss function (Cross-Entropy with cluster assignment as true value)
-                    loss_value   = net_utils.selector_init_loss(
-                        y_prob  = cluster_prob,
-                        clusters= clus_batch,
-                        name    = 'pred_clus_loss'
-                    )
-                # Compute gradients and update weights
-                gradient = tape.gradient(loss_value, sel_vars)
-                self.optimizer.apply_gradients(zip(gradient, sel_vars))
-                
-                epoch_loss += loss_value.numpy()
-
-            avg += epoch_loss /step
-                
-            # Log Results every 10 epochs
-            if epoch % 10 == 0:
-                print("Selector Init Loss Avg at Epoch %d: %.4f" % (epoch, float(avg/10)))
-                avg = 0
-
-
-        print('Time taken: {:.4f}'.format(time.time() - start_time))
-        print('Selector initialisation complete!')
-        print('----------------------------------')
-
+         return y_pred
 
 
     # Main training step iterative update
     def train_step(self, inputs, training = True):
         X, y = inputs
 
+        # Define variables
+        critic_vars = [var for var in self.trainable_weights if 'predictor' in var.name]
+        actor_vars = [var for var in self.trainable_weights if 'encoder' in var.name or 'selector' in var.name]
+        embedding_vars = self.embeddings
 
-        # Update Critic
-        with tf.GradientTape(watch_accessed_variables=False) as tape:
-            
-            # Select vars
-            critic_vars = [var for var in self.trainable_weights if 'predictor' in var.name]
-            tape.watch(critic_vars)
+        # Compute all gradients
+        with tf.GradientTape(watch_accessed_variables=False, persistent=True) as tape:
+            # Select variables to keep track of
+            tape.watch(critic_vars + actor_vars + embedding_vars)
 
             # Compute steps
             latent_projs  = self.Encoder(X, training = False)
             cluster_probs = self.Selector(latent_projs, training = False)
-            
-            # Flatten and sample cluster
+
+
+            ### Compute cluster samples and corresponding embeddings
             pis_unroll_  = tf.reshape(cluster_probs, shape = [-1, self.K])
             cluster_samp = tf.squeeze((tf.random.categorical(logits = pis_unroll_, num_samples = 1,
                                                             seed = self.seed)))
@@ -962,110 +767,65 @@ class ACTPC(tf.keras.Model):
             # Matrix multiplication returns unrolled data with corresponding embedding value
             cluster_emb_unroll = tf.linalg.matmul(
                 a = mask_emb, b = self.embeddings)
-            
-            # Return to temporal shape
-            new_shape   = [-1, cluster_probs.get_shape()[1]] + [self.latent_dim]
-            cluster_emb = tf.reshape(cluster_emb_unroll, shape = new_shape) 
 
-    
+            # Return to temporal shape
+            new_shape = [-1, cluster_probs.get_shape()[1]] + [self.latent_dim]
+            cluster_emb = tf.reshape(cluster_emb_unroll, shape=new_shape)
+
+            # Compute probabilities for this assignment
+            idx_slices_ = tf.expand_dims(tf.cast(cluster_samp, dtype='int32'), axis=1)
+            clus_pi_unroll_ = tf.gather_nd(params=pis_unroll_, indices=idx_slices_)  #
+            cluster_pis = tf.reshape(clus_pi_unroll_, shape=[-1, cluster_probs.get_shape()[1]])
+
             # Output vector given sampled cluster embedding
             y_pred       = self.Predictor(cluster_emb, training = training)    
-        
-            # Compute loss
+
+            # Compute cluster phenotypes
+            y_clus     = tf.squeeze(self.Predictor(tf.expand_dims(embedding_vars, axis = 0), training = False))
+
+
+
+            ### Compute loss functions
+
+            # Critic Losses
             loss_critic = net_utils.predictive_clustering_loss(y_true = y, y_pred = y_pred,
                 y_type = self.y_type, name   = 'pred_clus_loss')
 
-            
-        # Compute gradient
-        critic_grad = tape.gradient(target = loss_critic, sources = critic_vars)
-        self.optimizer.apply_gradients(zip(critic_grad, critic_vars))
-
-
-        # Update Actor
-        with tf.GradientTape(watch_accessed_variables=False) as tape:
-            
-            # Select vars
-            actor_vars = [var for var in self.trainable_weights if 'encoder' in var.name or 'selector' in var.name]
-            tape.watch(actor_vars)
-
-            # Compute Forward pass variables
-            latent_projs   = self.Encoder(X, training = True)
-            cluster_probs  = self.Selector(latent_projs, training = True)
-
-            # Unroll Assignments to Sample cluster and compute corresponding embedding
-            cluster_emb, cluster_pis = self.sample_cluster_pis(cluster_probs)
-
-            # Compute output vector and probability for corresponding cluster given sampled cluster embedding
-            y_pred         =  self.Predictor(cluster_emb, training = False)
-
-            # Compute L1 loss weighted by cluster confidence
+            # Actor Losses
             weighted_loss_actor_1 = net_utils.actor_predictive_clustering_loss(
                 y_true = y, y_pred = y_pred, cluster_assignment_probs = cluster_pis,
                 y_type = self.y_type, name = 'actor_pred_clus_loss')
-
-            # Compute Cluster Entropy loss
-            entr_loss  = net_utils.cluster_probability_entropy_loss(
-                y_prob = cluster_probs,
-                name   = 'clust_entropy_loss')
+            entr_loss  = net_utils.cluster_probability_entropy_loss(y_prob = cluster_probs, name   = 'clust_entropy_loss')
 
             loss_actor = weighted_loss_actor_1 + self.alpha * entr_loss
-            
-        # Compute gradients and update
-        actor_grad = tape.gradient(target=loss_actor, sources = actor_vars)
-        self.optimizer.apply_gradients(zip(actor_grad, actor_vars))
 
-
-        #Update embeddings
-        embedding_vars = self.embeddings
-        with tf.GradientTape(watch_accessed_variables=False) as tape:
-            
-            # Watch embedding variables
-            tape.watch(embedding_vars)
-
-            # Compute cluster_assignments and pred_y
-            cluster_probs      = self.Selector(self.Encoder(X, training=False), training=False)
-            
-            # Flatten and sample cluster
-            pis_unroll_  = tf.reshape(cluster_probs, shape = [-1, self.K])
-            cluster_samp = tf.squeeze((tf.random.categorical(logits = pis_unroll_, num_samples = 1,
-                                                            seed = self.seed)))
-            
-            # Convert to one_hot encoding
-            mask_emb = tf.one_hot(cluster_samp, depth = self.K)
-    
-            # Matrix multiplication returns unrolled data with corresponding embedding value
-            cluster_emb_unroll = tf.linalg.matmul(
-                a = mask_emb, b = embedding_vars)
-            
-            # Return to temporal shape
-            new_shape   = [-1, cluster_probs.get_shape()[1]] + [self.latent_dim]
-            cluster_emb = tf.reshape(cluster_emb_unroll, shape = new_shape) 
-        
-            # Predict y
-            y_pred     = self.Predictor(cluster_emb, training=False)
-            
-            # Compute cluster phenotypes
-            y_clus     = tf.squeeze(self.Predictor(
-                        tf.expand_dims(embedding_vars, axis = 0), 
-                        training = False))
-
+            # Embedding Losses
             # Compute embedding separation loss and predictive clustering loss
             emb_loss_1 = net_utils.predictive_clustering_loss(
-                y_true = y, y_pred = y_pred,
-                y_type = self.y_type, name   = 'emb_pred_clus_loss')
-            
+                y_true=y, y_pred=y_pred,
+                y_type=self.y_type, name='emb_pred_clus_loss')
+
             # emb_loss_2 = net_utils.euclidean_separation_loss(
             #     y_clusters = tf.squeeze(y_clus), name   = 'emb_sep_loss')
             emb_loss_2 = net_utils.euclidean_separation_loss(
-                y_clusters = embedding_vars, name   = 'emb_sep_loss')
-            
-            emb_loss_3 = net_utils.KL_separation_loss(
-                y_clusters = y_clus, name = "KL_emb_loss")
+                y_clusters=embedding_vars, name='emb_sep_loss')
 
-            loss_emb   = emb_loss_1 + self.beta * emb_loss_2
+            emb_loss_3 = net_utils.KL_separation_loss(
+                y_clusters=y_clus, name="KL_emb_loss")
+
+            loss_emb = emb_loss_1 + self.beta * emb_loss_2
             # loss_emb   = emb_loss_1 + self.beta * emb_loss_3
 
-        # Compute gradients and update
+
+        # Compute gradients critic
+        critic_grad = tape.gradient(target = loss_critic, sources = critic_vars)
+        self.optimizer.apply_gradients(zip(critic_grad, critic_vars))
+
+        # Compute gradients actor
+        actor_grad = tape.gradient(target=loss_actor, sources = actor_vars)
+        self.optimizer.apply_gradients(zip(actor_grad, actor_vars))
+
+        # Compute gradients embeddings
         emb_grad  =  tape.gradient(target = loss_emb, sources=embedding_vars)
         self.optimizer.apply_gradients(zip([emb_grad], [embedding_vars]))
         self.embeddings = embedding_vars

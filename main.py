@@ -17,8 +17,9 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import roc_auc_score
 
 
-os.chdir('/home/ds.ccrg.kadooriecentre.org/henrique.aguiar/Desktop/COPD/adding-attention/scripts/')
-sys.path.append('/home/ds.ccrg.kadooriecentre.org/henrique.aguiar/Desktop/COPD/adding-attention/scripts/models/main/')
+# os.chdir('/home/ds.ccrg.kadooriecentre.org/henrique.aguiar/Desktop/COPD/adding-attention/scripts/')
+# sys.path.append('/home/ds.ccrg.kadooriecentre.org/henrique.aguiar/Desktop/COPD/adding-attention/scripts/models/main/')
+sys.path.append("/home/ball4537/PycharmProjects/Temporal-Clustering-Phenotyping/models/main/")
 
 from data_loader import load_from_csv
 # Compute Data Loader load from sample
@@ -37,12 +38,18 @@ Load and import data
 """
 
 # Import data as float32 numpy arrays
-X_data, y_data, ids, mask  = load_from_csv(
-    folder_path = '/home/ds.ccrg.kadooriecentre.org/henrique.aguiar/Desktop/COPD/data/processed/',
-    X_name   = 'COPD_VLS_process', y_name = 'copd_outcomes', time_range  = (0, 72), feat_name    = 'vitals', norm = "min-max")
+# X_data, y_data, ids, mask  = load_from_csv(
+#     folder_path = '/home/ds.ccrg.kadooriecentre.org/henrique.aguiar/Desktop/COPD/data/processed/',
+#     X_name   = 'COPD_VLS_process', y_name = 'copd_outcomes', time_range  = (0, 72), feat_name    = 'vitals', norm = "min-max")
+X_data = np.ones(shape = (5000, 18, 4))
+y_data = np.eye(5)[np.repeat(a = np.array([0,1,2,3,4]), repeats = 5000//5).reshape(-1)]
+ids = np.ones(shape = (5000, 18, 2))
+mask = np.ones(shape = (5000, 18))
+mask[:, -4:] = 0
 
 # Re-label and assign each subsequence to time-series.
 X, y = X_data, np.repeat(np.expand_dims(y_data, axis = 1), repeats = X_data.shape[1], axis = 1)
+
 
 # Split into train, validation, test data
 X_train, X_test, y_train, y_test, id_train, id_test = train_test_split(
@@ -157,9 +164,30 @@ init_sel.compile(optimizer = opt_init, loss = utils_model.selector_init_loss)
 # Fit
 init_sel.fit(x = X_train, y = tf.cast(tf.one_hot(cluster_assign, depth = num_clusters), dtype = tf.float32), 
              batch_size = bs_init, epochs = init_epochs_sel, verbose = 1, validation_data = (X_val, y_val))
-    
-    
 
+
+#%% Main Training
+with strategy.scope():
+
+    # Load data
+    model = ACTPC(num_clusters=num_clusters, output_dim=output_dim, y_type=y_type,
+                  latent_dim=latent_dim, beta=beta, alpha=alpha, seed=seed, num_encoder_layers=num_encoder_layers,
+                  num_encoder_nodes=num_encoder_nodes, state_fn=state_fn, recurrent_activation=recurrent_fn,
+                  encoder_dropout=encoder_dropout, recurrent_dropout=recurrent_dropout, mask_value=mask_value,
+                  num_selector_layers=num_selector_layers, num_selector_nodes=num_selector_nodes, selector_fn=selector_fn,
+                  selector_output_fn=selector_output_fn, selector_dropout=selector_dropout, num_predictor_layers=num_predictor_layers,
+                  num_predictor_nodes=num_predictor_nodes, predictor_fn=predictor_fn, predictor_dropout=predictor_dropout,
+                  encoder_name='encoder', predictor_name='predictor', selector_name='selector')
+
+    embs  = init_sel.embeddings
+    model.build(input_shape = X_data.shape, embeddings = embs)
+
+    # Load optimizer
+    opt = optimizers.Adam(learning_rate=lr)
+
+# Train model
+model.fit(x = X_train, y = y_train, batch_size=bs, epochs=epochs, verbose = 1,
+          validation_data = (X_val, y_val))
 
 
 
