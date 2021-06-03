@@ -658,7 +658,7 @@ class ACTPC(tf.keras.Model):
 
     
     # Build method to initialise model
-    def build(self, input_shape = None. embeddings = None):
+    def build(self, input_shape = None, embeddings = None):
 
         # Initialise Layers and Embeddings.
         self.Encoder           = Encoder(intermediate_dim = self.latent_dim,
@@ -734,7 +734,7 @@ class ACTPC(tf.keras.Model):
         # Output vector given sampled cluster embedding
         y_pred = self.Predictor(cluster_emb, training=training)
 
-         return y_pred
+        return y_pred
 
 
     # Main training step iterative update
@@ -800,20 +800,15 @@ class ACTPC(tf.keras.Model):
             loss_actor = weighted_loss_actor_1 + self.alpha * entr_loss
 
             # Embedding Losses
-            # Compute embedding separation loss and predictive clustering loss
-            emb_loss_1 = net_utils.predictive_clustering_loss(
-                y_true=y, y_pred=y_pred,
-                y_type=self.y_type, name='emb_pred_clus_loss')
 
             # emb_loss_2 = net_utils.euclidean_separation_loss(
-            #     y_clusters = tf.squeeze(y_clus), name   = 'emb_sep_loss')
             emb_loss_2 = net_utils.euclidean_separation_loss(
                 y_clusters=embedding_vars, name='emb_sep_loss')
 
             emb_loss_3 = net_utils.KL_separation_loss(
                 y_clusters=y_clus, name="KL_emb_loss")
 
-            loss_emb = emb_loss_1 + self.beta * emb_loss_2
+            loss_emb = loss_critic + self.beta * emb_loss_2
             # loss_emb   = emb_loss_1 + self.beta * emb_loss_3
 
 
@@ -828,7 +823,7 @@ class ACTPC(tf.keras.Model):
         # Compute gradients embeddings
         emb_grad  =  tape.gradient(target = loss_emb, sources=embedding_vars)
         self.optimizer.apply_gradients(zip([emb_grad], [embedding_vars]))
-        self.embeddings = embedding_vars
+        self.embeddings.assign(embedding_vars)
 
 
         # Update Loss functions
@@ -873,7 +868,6 @@ class ACTPC(tf.keras.Model):
         clus_sep_loss    = net_utils.euclidean_separation_loss(y_clusters = self.embeddings)
         weig_pred_loss   = net_utils.actor_predictive_clustering_loss(y_true = y, y_pred = y_pred,
                                         cluster_assignment_probs = cluster_pis, y_type = self.y_type)
-        KL_sep_loss      = net_utils.KL_separation_loss(y_clusters)
 
         critic_loss      = pred_clus_loss
         actor_loss       = weig_pred_loss + self.alpha * entr_loss
@@ -887,14 +881,9 @@ class ACTPC(tf.keras.Model):
         val_L2.update_state(entr_loss)
         val_L3.update_state(clus_sep_loss)
 
-        # Update Relevant Metrics
-        # clus_KL_sep.update_state(KL_sep_loss)
-        # auroc.update_state(y_true = y_unroll_, y_pred = y_pred_unroll_)
-        cat_acc.update_state(y_true = y_unroll_, y_pred = y_pred_unroll_)
-
         return {'L1': val_L1_cri.result(), 'L2': val_L1_act.result(),
-                'L3': val_L_emb.result(), 'pis': val_L2.result(), 'Sep': val_L3.result(),
-                'KL':  KL_sep_loss,  "ACC": cat_acc.result()} #"AUC": auroc.result(),
+                'L3': val_L_emb.result(), 'pis': val_L2.result(), 'Sep': val_L3.result()}
+                # 'KL':  KL_sep_loss,  "ACC": cat_acc.result()} #"AUC": auroc.result(),
 
 
     # configuration file
