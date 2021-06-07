@@ -6,7 +6,6 @@ Loss, Metrics and Callback functions to use for model
 @author: henrique.aguiar@ds.ccrg.kadooriecentre.org
 """
 import tensorflow as tf
-import tensorflow.keras.callbacks as cbck
 import tensorflow.math as math
 from tensorflow.math import log, squared_difference, multiply, divide
 
@@ -36,8 +35,13 @@ def propagate_true_event_across_time(y, num_tstpms):
     
     return y
 
+val_data_weights = np.array([7992, 954, 162, 108])
+uniform          = np.array([1, 1, 1, 1])
+harmonic_weights = 1 / val_data_weights
+weights = tf.convert_to_tensor(harmonic_weights / np.sum(harmonic_weights), dtype = tf.float32)
+
 # Define custom loss functions
-def predictive_clustering_loss(y_true, y_pred, y_type = 'categorical', name = 'pred_clus_L'):
+def predictive_clustering_loss(y_true, y_pred, weights = weights,  y_type = 'categorical', name = 'pred_clus_L'):
     
     """
     Compute prediction clustering loss between predicted output and true output.
@@ -70,7 +74,7 @@ def predictive_clustering_loss(y_true, y_pred, y_type = 'categorical', name = 'p
         # weigh_cat_loss = y_true * log(y_pred) * tf.expand_dims(tf.expand_dims(weights, axis = 0), axis = 0)
         
         # batch_loss = -tf.reduce_mean(tf.reduce_sum(weigh_cat_loss, axis = -1), name = name)
-        batch_loss = -tf.reduce_mean(tf.reduce_sum(y_true * log(y_pred), axis = -1), name = name)
+        batch_loss = -tf.reduce_mean(tf.reduce_sum(weights * y_true * log(y_pred), axis = -1), name = name)
 
     elif y_type == 'continuous':
         # Compute L2 Loss. y_pred not given final output function.
@@ -91,8 +95,6 @@ def selector_init_loss(clusters, y_prob, name = 'init_selec_loss'):
     returns: Categorical Cross-Entropy loss averaged over samples and time-steps. This is very similar to predictive
     clustering loss with cluster assignment constant across time
     """
-    print("y_prob shape: ", y_prob.get_shape())
-    print("cluster shape: ", clusters.get_shape())
     # Compute Categorical Cross Entropy. y_pred output of softmax function to model probability vector.
     batch_loss = -tf.reduce_mean(tf.reduce_sum(clusters * log(y_prob), axis = -1), name = name)
 
@@ -223,73 +225,3 @@ def KL_separation_loss(y_clusters, name = "KL_emb_sep"):
 
 
 
-
-# Callbacks
-def get_callbacks(model_name, folder, loss_names, metric_names, track_metric, csv_log = True, early_stop = True, 
-                  lr_scheduler = True, save_weights = True, tensorboard = True, **kwargs):
-    
-    """
-    Generate callbacks dictionary.
-    """
-    if folder[-1] != '/':
-        folder = folder + '/'
-        
-    # Generate loss and model save paths
-    today = str(date.today())
-    save_folder = folder + 'experiments/{}/{}/checkpoints/'.format(today, model_name)
-    csv_folder  = folder + 'experiments/{}/{}/results/'.format(today, model_name)
-    log_dir = folder + 'experiments/{}/{}/logs/fit/'.format(today, model_name)
-    
-    if not os.path.exists(save_folder):
-        os.makedirs(save_folder)
-        
-    if not os.path.exists(csv_folder):
-        os.makedirs(csv_folder)
-        
-    # Initialise Callbacks Dictionary    
-    callbacks_dic = {}
-
-    for loss in loss_names:
-
-        ckpt = cbck.ModelCheckpoint(filepath = save_folder + '{}_val'.format(loss) + '/ckpt-{epoch}',
-                                   monitor = 'val_' + loss, save_freq = 'epoch')
-        csv_ckpt = cbck.CSVLogger(filename = csv_folder + loss, separator = ',', append = True)
-        
-        # Save callbacks
-        callbacks_dic[loss] = ckpt
-        callbacks_dic[loss + '_csv'] = csv_ckpt
-
-    for metric in metric_names:
-        
-        ckpt = cbck.ModelCheckpoint(filepath = save_folder + '{}'.format(metric) + '/ckpt-{epoch}',
-                                   monitor = metric, save_freq = 'epoch')
-        csv_ckpt = cbck.CSVLogger(filename = csv_folder + metric, separator = ',', append = True)
-        
-        # Save callbacks
-        callbacks_dic[metric] = ckpt
-        callbacks_dic[metric + '_csv'] = csv_ckpt        
-      
-    
-    if csv_log == True:
-        callbacks_dic['CSV_Logger'] = cbck.CSVLogger(filename = csv_folder + "loss-metrics.csv", separator = ',', append = True)
-        
-        
-    if early_stop == True:
-        callbacks_dic['EarlyStopping'] = cbck.EarlyStopping(monitor = 'val_' + track_metric,
-        mode = "min", restore_best_weights = True, min_delta = 0.0001, **kwargs)     
-        
-        
-    if lr_scheduler == True:
-        callbacks_dic['ReduceLR'] = cbck.ReduceLROnPlateau(monitor = 'val_' + track_metric,
-                    mode = 'min', cooldown = 10, min_lr = 0.0001, factor = 0.3,**kwargs)    
-        
-        
-    if save_weights == True:
-        callbacks_dic['save_weights'] = cbck.ModelCheckpoint(filepath = save_folder + 'weights/ckpt-{epoch}', monitor = 'val_' + track_metric, save_weights_only = True, mode = 'max', save_best_only = False, save_freq = 'epoch')
-    
-    
-    if tensorboard == True:
-        callbacks_dic['TensorBoard'] = cbck.TensorBoard(log_dir=log_dir, histogram_freq=1)
-        
-    
-    return callbacks_dic

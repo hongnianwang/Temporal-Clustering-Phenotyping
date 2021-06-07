@@ -15,7 +15,7 @@ import numpy as np
 from sklearn.cluster import KMeans
 
 import tensorflow as tf
-from tensorflow.keras.layers import LSTM, Masking, Dense, TimeDistributed
+from tensorflow.keras.layers import LSTM, Masking, Dense, TimeDistributed, Attention
 from tensorflow.keras import layers
 from tensorflow.keras import metrics
 
@@ -122,7 +122,7 @@ class Encoder(layers.Layer):
         # Iterate through hidden layers
         for layer_id_ in range(self.hidden_layers):
             layer_   = getattr(self, 'layer_' + str(layer_id_))
-            x        = layer_(x, training = training, mask = mask)
+            x        = layer_(x, training = training , mask = mask)
             
         # Output layer.
         latent_rep  = self.output_layer(x, training = training, mask = mask)   # shape (bs, T, intermediate_dim)
@@ -131,6 +131,89 @@ class Encoder(layers.Layer):
 
     
 
+class Encoder_Attention(layers.Layer):
+    
+    """
+    Class for an Encoder layer architecture. Input tensors expected to be of shape (bs x times x xdim), and
+    output tensors expected of shape (bs x times x latent dim).
+
+    Encoder Layer stacks LSTMs layers using  whole output sequences - the overall output is of size (bs x time_steps x latent dim), with [i, j, :] representing the latent vector from time-subsequence corresponding to patient i and from times t=0, to t=j.
+    
+    Params:
+
+    - intermediate_dim    : dimensionality of latent space for each sub-sequence. (default = 32)
+    - hidden_layers       : Number of "hidden" LSTM layers. Total number of stacked layers is hidden_layers + 1 (default = 1)
+    - hidden_nodes        : For "hidden" LSTM layers, the dimensionality of the intermediate tensors/state. (default = '20')
+    - state_fn            : The activation function to use on cell state/output. (default = 'tanh')
+    - recurrent_activation: The activation function to use on forget/input/output gates. (default = 'sigmoid')
+    - dropout             : dropout rate to be used on cell state/output computation. (default = 0.6)
+    - recurrent_dropout   : dropout rate to be used on forget/input/output gates. (default = 0)
+    - mask_value          : mask_value to feed to masking layer (checks across last dimensions of x). (default = 0.0)
+    - name                : Name on which to save component. (default = 'encoder')
+
+    Call:
+            inputs - tensor of shape (batch_size, max_length_time_steps, x_dim)
+            outputs- tensor of shape (batch_size, max_length_time_steps, intermediate_dim).
+            
+            Output at index [i,j,:] represents the latent representation of patient i given subsequence from time 0 to time j.
+    """
+    def __init__(self, intermediate_dim=32, hidden_layers=1, hidden_nodes=20, state_fn="tanh", recurrent_fn="sigmoid",
+                 dropout=0.7, recurrent_dropout=0.0, mask_value=0.0, name='encoder'):
+        
+        super().__init__(name =name)
+        self.intermediate_dim = intermediate_dim
+        self.hidden_layers    = hidden_layers
+        self.hidden_nodes     = hidden_nodes
+        self.state_fn         = state_fn
+        self.recurrent_fn     = recurrent_fn
+        self.dropout          = dropout
+        self.recurrent_dropout= recurrent_dropout
+        self.mask_value       = mask_value
+
+
+    # Build for tensorflow model
+    def build(self, input_shape = None):
+        
+        # Add intermediate layers,
+        for layer_id_ in range(self.hidden_layers):
+            
+            # Each intermediate sequence returns a time sequence of representations.
+            layer_            = LSTM(units = self.hidden_nodes, return_sequences = True, activation = self.state_fn,
+                recurrent_activation = self.recurrent_fn, dropout = self.dropout, recurrent_dropout = self.recurrent_dropout,
+                return_state = False, name = self.name)
+            
+            # Set attribute for class
+            setattr(self, 'layer_' + str(layer_id_), layer_)
+
+        # Add output layer - output is the latent representation for each sub-sequence.
+        self.output_layer     = LSTM(units = self.intermediate_dim, activation = self.state_fn,
+                recurrent_activation = self.recurrent_fn, return_sequences = True, dropout = self.dropout,     
+                recurrent_dropout = self.recurrent_dropout, return_state = False, name = self.name)
+        
+        super().build(input_shape)
+        
+        
+    # call attribute is used to evaluate the layer.
+    def call(self, inputs, training = True):
+
+        x = inputs
+
+        # Apply Masking layer.
+        if self.mask_value is not None:
+            # Mask layer ignores time stamps with all entries given by mask_value - propagated by default.
+            mask = Masking(mask_value = self.mask_value)(inputs)._keras_mask
+
+        # Iterate through hidden layers
+        for layer_id_ in range(self.hidden_layers):
+            layer_   = getattr(self, 'layer_' + str(layer_id_))
+            x        = layer_(x, training = training , mask = mask)
+            
+        # Output layer.
+        latent_rep  = self.output_layer(x, training = training, mask = mask)   # shape (bs, T, intermediate_dim)
+
+        return latent_rep
+
+    
 class MLP(layers.Layer):
     
     """
@@ -298,7 +381,7 @@ class Enc_Pred(tf.keras.Model):
         
         # Initialise Embeddings
         self.embeddings          = tf.Variable(initial_value = tf.zeros(shape = (self.K, self.latent_dim),
-                                                                        dtype = tf.float32), trainable = True)
+                                                    dtype = tf.float32), trainable = True, name = "embeddings")
 
 
 
@@ -329,12 +412,12 @@ class Enc_Pred(tf.keras.Model):
         y_unroll     = y_npy.reshape(-1, self.output_dim)                # shape (nx x T, ydims)
 
         # Compute KMeans on unrolled predicted output
-        init_km = KMeans(n_clusters = self.K, init='k-means++', random_state = self.seed, **kwargs)
-        init_km.fit(y_unroll)
+        km = KMeans(n_clusters = self.K, init='k-means++', random_state = self.seed, **kwargs)
+        km.fit(y_unroll)
 
         # Obtain cluster centres and sample cluster assignments
-        centers_      = init_km.cluster_centers_                             # shape (K, ydims)
-        cluster_assign= init_km.predict(y_unroll).reshape(y_npy.shape[:-1])  # shape (nx, T)
+        centers_      = km.cluster_centers_                             # shape (K, ydims)
+        cluster_assign= km.predict(y_unroll).reshape(y_npy.shape[:-1])  # shape (nx, T)
 
         # Compute embedding vectors as closest latent to cluster centroid
         emb_vecs_     = np.zeros(shape = (self.K, self.latent_dim), dtype = 'float32')
@@ -366,7 +449,7 @@ class Enc_Pred(tf.keras.Model):
         # self.embeddings.assign(tf.convert_to_tensor(np.arctanh(emb_vecs_), name = 'embeddings', dtype = 'float32'), name = 'embeddings_init')
         # self.embeddings.assign(tf.convert_to_tensor(emb_vecs_, name = 'embeddings', dtype = 'float32'), name = 'embeddings_init')
         
-        return emb_vecs_, cluster_assign
+        return emb_vecs_, cluster_assign, km
 
     
     # Get configuration
@@ -396,6 +479,7 @@ class Enc_Pred(tf.keras.Model):
                        "predictor_name": self.predictor_name})
         
         return config
+
 
 
 class SEL_INIT(tf.keras.Model):
@@ -491,7 +575,7 @@ class SEL_INIT(tf.keras.Model):
         
         # Initialise Embeddings
         self.embeddings          = tf.Variable(initial_value = tf.zeros(shape = (self.K, self.latent_dim),
-                                                                        dtype = tf.float32), trainable = True)
+                                                        dtype = tf.float32), trainable = True, name = "embeddings")
 
         super().build(input_shape)
     
@@ -701,23 +785,23 @@ class ACTPC(tf.keras.Model):
                 print(e)
                 raise ValueError('Embeddings could not be converted to variables.')
                 
-
+        
         super().build(input_shape)             # Build networks as inherited from Keras model
 
 
     # Call method - defines model computation logic
     def call(self, inputs, training = True):
-
+        
         # assign x to updatable tensor
         x = inputs
 
         # Compute steps
-        latent_projs = self.Encoder(X, training=False)
+        latent_projs = self.Encoder(x, training=False)
         cluster_probs = self.Selector(latent_projs, training=False)
 
         # Flatten and sample cluster
         pis_unroll_ = tf.reshape(cluster_probs, shape=[-1, self.K])
-        cluster_samp = tf.squeeze((tf.random.categorical(logits=pis_unroll_, num_samples=1,
+        cluster_samp = tf.squeeze((tf.random.categorical(logits=tf.math.log(pis_unroll_), num_samples=1,
                                                          seed=self.seed)))
 
         # Convert to one_hot encoding
@@ -742,24 +826,29 @@ class ACTPC(tf.keras.Model):
         X, y = inputs
 
         # Define variables
-        critic_vars = [var for var in self.trainable_weights if 'predictor' in var.name]
-        actor_vars = [var for var in self.trainable_weights if 'encoder' in var.name or 'selector' in var.name]
+        critic_vars = [var for var in self.trainable_variables if 'predictor' in var.name]
+        actor_vars = [var for var in self.trainable_variables if 'encoder' in var.name or 'selector' in var.name]
         embedding_vars = self.embeddings
+
 
         # Compute all gradients
         with tf.GradientTape(watch_accessed_variables=False, persistent=True) as tape:
+            
             # Select variables to keep track of
-            tape.watch(critic_vars + actor_vars + embedding_vars)
-
+            tape.watch(critic_vars)
+            tape.watch(actor_vars)
+            tape.watch(embedding_vars)
+            
             # Compute steps
-            latent_projs  = self.Encoder(X, training = False)
-            cluster_probs = self.Selector(latent_projs, training = False)
+            latent_projs  = self.Encoder(X, training = True)
+            cluster_probs = self.Selector(latent_projs, training = True)
 
 
             ### Compute cluster samples and corresponding embeddings
             pis_unroll_  = tf.reshape(cluster_probs, shape = [-1, self.K])
-            cluster_samp = tf.squeeze((tf.random.categorical(logits = pis_unroll_, num_samples = 1,
+            cluster_samp = tf.squeeze((tf.random.categorical(logits = tf.math.log(pis_unroll_), num_samples = 1,
                                                             seed = self.seed)))
+            is_sample_max = tf.equal(tf.argmax(pis_unroll_, axis = -1), cluster_samp)
             
             # Convert to one_hot encoding
             mask_emb = tf.one_hot(cluster_samp, depth = self.K)
@@ -773,15 +862,16 @@ class ACTPC(tf.keras.Model):
             cluster_emb = tf.reshape(cluster_emb_unroll, shape=new_shape)
 
             # Compute probabilities for this assignment
-            idx_slices_ = tf.expand_dims(tf.cast(cluster_samp, dtype='int32'), axis=1)
-            clus_pi_unroll_ = tf.gather_nd(params=pis_unroll_, indices=idx_slices_)  #
+            idx_slices_ = tf.stack((tf.range(pis_unroll_.get_shape()[0]),
+                                tf.cast(cluster_samp, dtype = 'int32')), axis = 1)
+            clus_pi_unroll_ = tf.gather_nd(params=pis_unroll_, indices=idx_slices_)  
             cluster_pis = tf.reshape(clus_pi_unroll_, shape=[-1, cluster_probs.get_shape()[1]])
 
             # Output vector given sampled cluster embedding
             y_pred       = self.Predictor(cluster_emb, training = training)    
 
             # Compute cluster phenotypes
-            y_clus     = tf.squeeze(self.Predictor(tf.expand_dims(embedding_vars, axis = 0), training = False))
+            y_clus     = tf.squeeze(self.Predictor(tf.expand_dims(embedding_vars, axis = 0), training = True))
 
 
 
@@ -808,8 +898,8 @@ class ACTPC(tf.keras.Model):
             emb_loss_3 = net_utils.KL_separation_loss(
                 y_clusters=y_clus, name="KL_emb_loss")
 
-            loss_emb = loss_critic + self.beta * emb_loss_2
-            # loss_emb   = emb_loss_1 + self.beta * emb_loss_3
+            loss_emb = loss_critic + self.beta * emb_loss_3
+            # loss_emb   = emb_loss_1 + self.beta * emb_loss_2
 
 
         # Compute gradients critic
@@ -818,7 +908,7 @@ class ACTPC(tf.keras.Model):
 
         # Compute gradients actor
         actor_grad = tape.gradient(target=loss_actor, sources = actor_vars)
-        self.optimizer.apply_gradients(zip(actor_grad, actor_vars))
+        #elf.optimizer.apply_gradients(zip(actor_grad, actor_vars))
 
         # Compute gradients embeddings
         emb_grad  =  tape.gradient(target = loss_emb, sources=embedding_vars)
@@ -834,7 +924,7 @@ class ACTPC(tf.keras.Model):
         L3.update_state(emb_loss_2)
 
         return {'L1': L1_cri.result(), 'L2': L1_act.result(), 'L3': L_emb.result(), "Ent": L2.result(), "Sep": L3.result()}
-                # 'entropy': L2.result(), 'emb_sep': L3.result()}
+                
 
     
     # Evaluation step for Validation or Evaluation
@@ -940,7 +1030,7 @@ class ACTPC(tf.keras.Model):
         pis_unroll_  = tf.reshape(cluster_probs, shape = [-1, self.K])
         
         # Sample given probabilistic assignment to each sample, time pair (i,j)
-        cluster_samp = tf.squeeze((tf.random.categorical(logits = pis_unroll_, num_samples = 1,
+        cluster_samp = tf.squeeze((tf.random.categorical(logits = tf.math.log(pis_unroll_), num_samples = 1,
                                                         seed = self.seed)))
         
         # Convert to one_hot encoding
@@ -956,13 +1046,13 @@ class ACTPC(tf.keras.Model):
         cluster_emb = tf.reshape(cluster_emb_unroll, shape = new_shape)
 
         # Compute corresponding probability assignment for sampled cluster
-        if not (None in cluster_probs.get_shape().as_list()):
-            idx_slices_      = tf.stack(
-                                (tf.range(pis_unroll_.get_shape()[0]),
-                                 tf.cast(cluster_samp, dtype = 'int32')), axis = 1)   # 2D indices (k,pred_cluster)
+        # if not (None in cluster_probs.get_shape().as_list()):
+        idx_slices_      = tf.stack(
+                            (tf.range(pis_unroll_.get_shape()[0]),
+                             tf.cast(cluster_samp, dtype = 'int32')), axis = 1)   # 2D indices (k,pred_cluster)
             
-        else:
-            idx_slices_      = tf.expand_dims(tf.cast(cluster_samp, dtype ='int32'), axis = 1)
+        # else:
+        #     idx_slices_      = tf.expand_dims(tf.cast(cluster_samp, dtype ='int32'), axis = 1)
 
         # Convert to temporal format
         clus_pi_unroll_  = tf.gather_nd(params = pis_unroll_, indices = idx_slices_)   #
